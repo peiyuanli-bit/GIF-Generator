@@ -5,7 +5,6 @@ import cv2
 import numpy as np
 import time
 import math
-import shutil
 import base64
 from PIL import Image, ImageFilter, ImageDraw, ImageFont, ImageChops
 from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip
@@ -20,6 +19,117 @@ MIN_DIMENSION_PX = 320
 MAX_DIMENSION_PX = 1080
 DEFAULT_BTN1_NAME = "btn_appstore.png"
 DEFAULT_BTN2_NAME = "btn_googleplay.png"
+ICON_FILENAME = "Logo.webp"  # 图标文件名
+
+# ==========================================
+# [配置] 多语言字典
+# ==========================================
+TRANSLATIONS = {
+    "zh": {
+        # [修改] 文案更新
+        "internal_notice": "仅限内部 GM / Agency 使用。",
+        "sidebar_title": "素材配置",
+        "lang_select": "Language / 语言",
+        "up_app": "App Store 图标",
+        "up_play": "Google Play 图标",
+        "up_sticker": "其他贴纸 (可选)",
+        "main_title": "GIF 生成器",
+        "step1_title": "1. 导入视频",
+        "up_video": "上传 MP4 视频",
+        "step2_title": "2. 参数设置",
+        "duration": "时长 (秒)",
+        "scale": "主体大小占比",
+        "btn_find": "寻找合适片段",
+        "analyzing": "**正在分析视频内容...**",
+        "error_video": "视频时长不足。",
+        "step3_title": "选择片段",
+        "previewing": "生成预览中...",
+        "clip_label": "片段",
+        "confirm_label": "确认使用片段：",
+        "btn_generate": "开始生成 GIF",
+        "balancing": "正在平衡画质与体积...",
+        "success": "生成完成 | 体积: {size}MB | 尺寸: {w}x{h}",
+        "warning_best": "已生成最佳结果，体积略大于预期。",
+        "download": "下载 GIF",
+        "btn_restart": "重新开始",
+        "err_file": "文件未生成",
+        "err_0kb": "生成文件异常 (0KB)",
+        "err_prev": "预览加载失败: {e}",
+        "err_fail": "处理失败: {e}"
+    },
+    "en": {
+        "internal_notice": "Internal Use Only (GM / Agency).",
+        "sidebar_title": "Assets Config",
+        "lang_select": "Language / 语言",
+        "up_app": "App Store Icon",
+        "up_play": "Google Play Icon",
+        "up_sticker": "Extra Sticker (Optional)",
+        "main_title": "GIF Generator",
+        "step1_title": "1. Import Video",
+        "up_video": "Upload MP4 Video",
+        "step2_title": "2. Settings",
+        "duration": "Duration (sec)",
+        "scale": "Subject Scale",
+        "btn_find": "Find Highlights",
+        "analyzing": "**Analyzing video content...**",
+        "error_video": "Video duration insufficient.",
+        "step3_title": "Select Clip",
+        "previewing": "Generating previews...",
+        "clip_label": "Clip",
+        "confirm_label": "Confirm Selection:",
+        "btn_generate": "Generate GIF",
+        "balancing": "Balancing quality and size...",
+        "success": "Done | Size: {size}MB | Dim: {w}x{h}",
+        "warning_best": "Generated best result (slightly over target size).",
+        "download": "Download GIF",
+        "btn_restart": "Start Over",
+        "err_file": "File not generated",
+        "err_0kb": "Error: 0KB File",
+        "err_prev": "Preview failed: {e}",
+        "err_fail": "Process failed: {e}"
+    }
+}
+
+# 初始化 Streamlit 页面配置
+st.set_page_config(page_title="GIF Generator", layout="wide")
+
+# ==========================================
+# [侧边栏布局逻辑]
+# ==========================================
+
+# 1. 在侧边栏最顶端创建一个“容器”占位
+sidebar_header_container = st.sidebar.container()
+
+# 2. 渲染语言选择器 (在容器下方)
+st.sidebar.markdown("### Language")
+language_option = st.sidebar.radio(
+    "Select Language / 选择语言",
+    ["中文", "English"],
+    label_visibility="collapsed"
+)
+lang_code = "zh" if language_option == "中文" else "en"
+t = TRANSLATIONS[lang_code]  # 获取当前语言字典
+
+# 3. 回头填充最顶端的容器 (图标 + 提示语)
+with sidebar_header_container:
+    if os.path.exists(ICON_FILENAME):
+        st.image(ICON_FILENAME, width=260)
+    else:
+        st.header("MOLOCO")
+
+    # [修改] 添加 text-align: center 实现居中
+    st.markdown(
+        f"""
+        <div style="margin-top: 5px; margin-bottom: 20px; text-align: center;">
+            <span style="color: #333; font-weight: bold; font-size: 16px;">
+                {t['internal_notice']}
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    # 分割线
+    st.markdown("---")
 
 
 # ==========================================
@@ -27,10 +137,10 @@ DEFAULT_BTN2_NAME = "btn_googleplay.png"
 # ==========================================
 def show_gif_robust(file_path):
     if not os.path.exists(file_path):
-        st.error("文件未生成")
+        st.error(t["err_file"])
         return
     if os.path.getsize(file_path) < 100:
-        st.error("生成文件异常 (0KB)")
+        st.error(t["err_0kb"])
         return
     try:
         with open(file_path, "rb") as f:
@@ -45,7 +155,7 @@ def show_gif_robust(file_path):
         '''
         st.markdown(html_code, unsafe_allow_html=True)
     except Exception as e:
-        st.error(f"预览加载失败: {e}")
+        st.error(t["err_prev"].format(e=e))
 
 
 # ==========================================
@@ -124,7 +234,7 @@ def smart_export_gif(clip, output_path, max_mb=1.0):
     msg = st.empty()
     progress_bar = st.progress(0)
 
-    st.caption("正在平衡画质与体积...")
+    st.caption(t["balancing"])
 
     for i, (scale, fps, colors) in enumerate(strategies):
         effective_scale = max(scale, absolute_min_scale)
@@ -144,13 +254,13 @@ def smart_export_gif(clip, output_path, max_mb=1.0):
                 if size_mb <= max_mb:
                     progress_bar.empty()
                     msg.empty()
-                    st.success(f"生成完成 | 体积: {size_mb:.2f}MB | 尺寸: {target_w}x{target_h}")
+                    st.success(t["success"].format(size=f"{size_mb:.2f}", w=target_w, h=target_h))
                     return True
         except:
             continue
 
     progress_bar.empty()
-    msg.warning(f"已生成最佳结果，体积略大于预期。")
+    msg.warning(t["warning_best"])
     return True
 
 
@@ -166,7 +276,7 @@ def find_top_3_highlights(video_path, clip_duration=3.0):
     prev = None
 
     status = st.empty()
-    status.markdown("**正在分析视频内容...**")
+    status.markdown(t["analyzing"])
     prog = st.progress(0)
 
     for i in range(0, search_len, sample_step):
@@ -235,45 +345,46 @@ def create_blurred_background(frame_img, size):
 
 
 # --- Streamlit 界面主入口 ---
-st.set_page_config(page_title="GIF 生成器", layout="wide")
 
 if 'step' not in st.session_state: st.session_state.step = 1
 if 'candidates' not in st.session_state: st.session_state.candidates = []
 if 'temp_video_path' not in st.session_state: st.session_state.temp_video_path = None
 if 'upload_key' not in st.session_state: st.session_state.upload_key = str(time.time())
 
-# --- 侧边栏 ---
-st.sidebar.markdown("### 素材配置")
+# --- 侧边栏：配置区 ---
+st.sidebar.markdown(f"### {t['sidebar_title']}")
 
 allowed_types = ["png", "jpg", "webp"]
-btn1_up = st.sidebar.file_uploader("App Store 图标", type=allowed_types)
-btn2_up = st.sidebar.file_uploader("Google Play 图标", type=allowed_types)
-extra_img_up = st.sidebar.file_uploader("其他贴纸 (可选)", type=allowed_types)
+btn1_up = st.sidebar.file_uploader(t["up_app"], type=allowed_types)
+btn2_up = st.sidebar.file_uploader(t["up_play"], type=allowed_types)
+extra_img_up = st.sidebar.file_uploader(t["up_sticker"], type=allowed_types)
 
-st.title("GIF 生成器")
+
+# --- 主界面 ---
+st.title(t["main_title"])
 
 # 步骤 1: 导入与设置
 if st.session_state.step == 1:
-    st.markdown("#### 1. 导入视频")
-    uploaded_file = st.file_uploader("上传 MP4 视频", type=["mp4"], key=st.session_state.upload_key,
+    st.markdown(f"#### {t['step1_title']}")
+    uploaded_file = st.file_uploader(t["up_video"], type=["mp4"], key=st.session_state.upload_key,
                                      label_visibility="collapsed")
 
-    st.markdown("#### 2. 参数设置")
+    st.markdown(f"#### {t['step2_title']}")
     col1, col2 = st.columns(2)
     with col1:
-        gif_duration = st.number_input("时长 (秒)", value=2.5, step=0.5, max_value=5.0)
+        gif_duration = st.number_input(t["duration"], value=2.5, step=0.5, max_value=5.0)
     with col2:
-        scale_factor = st.slider("主体大小占比", 0.6, 1.0, 0.9)
+        scale_factor = st.slider(t["scale"], 0.6, 1.0, 0.9)
 
     st.markdown("---")
     if uploaded_file:
-        if st.button("寻找合适片段", type="primary", use_container_width=True):
+        if st.button(t["btn_find"], type="primary", use_container_width=True):
             video_path = save_upload_to_temp(uploaded_file, "source_video")
             if video_path:
                 st.session_state.temp_video_path = video_path
                 candidates = find_top_3_highlights(video_path, gif_duration)
                 if not candidates:
-                    st.error("视频时长不足。")
+                    st.error(t["error_video"])
                 else:
                     st.session_state.candidates = candidates
                     st.session_state.gif_duration = gif_duration
@@ -283,13 +394,13 @@ if st.session_state.step == 1:
 
 # 步骤 2: 预览与导出
 elif st.session_state.step == 2:
-    st.markdown("#### 选择片段")
+    st.markdown(f"#### {t['step3_title']}")
     video_path = st.session_state.temp_video_path
     duration = st.session_state.gif_duration
     candidates = st.session_state.candidates
 
     cols = st.columns(3)
-    with st.spinner("生成预览中..."):
+    with st.spinner(t["previewing"]):
         original_clip = VideoFileClip(video_path)
         for i, timestamp in enumerate(candidates):
             with cols[i]:
@@ -299,16 +410,17 @@ elif st.session_state.step == 2:
                     sub = sub.resize(height=240)
                     sub.write_videofile(p_path, codec="libx264", audio=False, preset="ultrafast", logger=None)
                 st.video(p_path)
-                st.caption(f"片段 {i + 1} ({timestamp:.1f}s)")
+                st.caption(f"{t['clip_label']} {i + 1} ({timestamp:.1f}s)")
         original_clip.close()
 
     st.markdown("---")
     # 居中显示选择组件
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        selected_option = st.radio("确认使用片段：", [0, 1, 2], format_func=lambda x: f"片段 {x + 1}", horizontal=True)
+        selected_option = st.radio(t["confirm_label"], [0, 1, 2], format_func=lambda x: f"{t['clip_label']} {x + 1}",
+                                   horizontal=True)
 
-    if st.button("开始生成 GIF", type="primary", use_container_width=True):
+    if st.button(t["btn_generate"], type="primary", use_container_width=True):
         clips_to_close = []
         try:
             start_time = candidates[selected_option]
@@ -405,7 +517,7 @@ elif st.session_state.step == 2:
                     col_dl1, col_dl2, col_dl3 = st.columns([1, 2, 1])
                     with col_dl2:
                         st.download_button(
-                            label=f"下载 GIF ({os.path.getsize(out_path) / 1024 / 1024:.2f}MB)",
+                            label=f"{t['download']} ({os.path.getsize(out_path) / 1024 / 1024:.2f}MB)",
                             data=f,
                             file_name="endcard.gif",
                             mime="image/gif",
@@ -418,11 +530,11 @@ elif st.session_state.step == 2:
             btn2_clip.close()
 
         except Exception as e:
-            st.error(f"处理失败: {e}")
+            st.error(t["err_fail"].format(e=e))
         finally:
             for c in clips_to_close: c.close()
 
-    if st.button("重新开始"):
+    if st.button(t["btn_restart"]):
         st.session_state.step = 1
         st.session_state.upload_key = str(time.time())
         st.rerun()
