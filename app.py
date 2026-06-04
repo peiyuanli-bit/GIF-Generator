@@ -19,7 +19,7 @@ if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
 # --- 配置项 ---
-MAX_FILE_SIZE_MB = 0.95
+MAX_FILE_SIZE_MB = 0.98
 MIN_DIMENSION_PX = 320
 MIN_EXPORT_DIMENSION_PX = 220
 MAX_DIMENSION_PX = 1080
@@ -208,6 +208,13 @@ def remove_file_if_exists(file_path):
         pass
 
 
+def make_temp_file_path(prefix, suffix):
+    fd, file_path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    remove_file_if_exists(file_path)
+    return file_path
+
+
 def optimize_gif_with_gifsicle(file_path, colors, lossy):
     gifsicle = shutil.which("gifsicle")
     if not gifsicle or not os.path.exists(file_path):
@@ -229,18 +236,55 @@ def optimize_gif_with_gifsicle(file_path, colors, lossy):
         remove_file_if_exists(optimized_path)
 
 
-def smart_export_gif(clip, output_path, max_mb=1.0):
-    strategies = [
-        (1.0, 18, 192, MIN_DIMENSION_PX, 0),
-        (0.9, 15, 128, MIN_DIMENSION_PX, 10),
-        (0.8, 12, 96, MIN_DIMENSION_PX, 20),
-        (0.7, 10, 64, MIN_DIMENSION_PX, 30),
-        (0.6, 8, 48, MIN_DIMENSION_PX, 40),
-        (0.65, 8, 48, 280, 45),
-        (0.55, 7, 32, 260, 55),
-        (0.48, 6, 24, 240, 65),
-        (0.4, 5, 16, MIN_EXPORT_DIMENSION_PX, 80),
+def build_gif_export_strategies():
+    return [
+        (1.0, 18, 256, MIN_DIMENSION_PX, 0),
+        (1.0, 15, 256, MIN_DIMENSION_PX, 0),
+        (0.92, 15, 192, MIN_DIMENSION_PX, 5),
+        (0.84, 14, 192, MIN_DIMENSION_PX, 10),
+        (0.78, 12, 160, MIN_DIMENSION_PX, 15),
+        (0.72, 12, 128, MIN_DIMENSION_PX, 20),
+        (0.66, 10, 96, MIN_DIMENSION_PX, 30),
+        (0.6, 9, 80, 300, 40),
+        (0.55, 8, 64, 280, 50),
+        (0.5, 7, 48, 260, 60),
+        (0.45, 6, 32, 240, 70),
+        (0.4, 5, 24, MIN_EXPORT_DIMENSION_PX, 80),
     ]
+
+
+def compute_target_width(original_w, min_edge, scale, min_edge_px):
+    min_scale = min_edge_px / min_edge if min_edge > 0 else 1.0
+    effective_scale = min(max(scale, min_scale), 1.0)
+    return max(2, int(original_w * effective_scale))
+
+
+def write_palette_gif(ffmpeg, source_path, output_path, target_w, fps, colors):
+    palette_path = f"{output_path}.palette.png"
+    scale_filter = f"fps={fps},scale={target_w}:-2:flags=lanczos"
+    palette_filter = f"{scale_filter},palettegen=max_colors={colors}:stats_mode=diff"
+    gif_filter = f"{scale_filter} [x]; [x][1:v] paletteuse=dither=sierra2_4a:diff_mode=rectangle"
+
+    remove_file_if_exists(palette_path)
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-i", source_path, "-vf", palette_filter, "-frames:v", "1", palette_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [ffmpeg, "-y", "-i", source_path, "-i", palette_path, "-lavfi", gif_filter, output_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        remove_file_if_exists(palette_path)
+
+
+def smart_export_gif(clip, output_path, max_mb=1.0):
+    strategies = build_gif_export_strategies()
     original_w = clip.w
     original_h = clip.h
     min_edge = min(original_w, original_h)
@@ -250,14 +294,47 @@ def smart_export_gif(clip, output_path, max_mb=1.0):
     progress_bar = st.progress(0)
     st.caption(t["balancing"])
 
-    for i, (scale, fps, colors, min_edge_px, lossy) in enumerate(strategies):
-        min_scale = min_edge_px / min_edge if min_edge > 0 else 1.0
-        effective_scale = max(scale, min_scale)
-        effective_scale = min(effective_scale, 1.0)
-        target_w = max(2, int(original_w * effective_scale))
-        progress = (i + 1) / len(strategies)
-        progress_bar.progress(progress)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        source_path = make_temp_file_path("gif_source_", ".mp4")
+        try:
+            progress_bar.progress(0.05)
+            clip.write_videofile(
+                source_path,
+                fps=max(fps for _, fps, _, _, _ in strategies),
+                codec="libx264",
+                audio=False,
+                preset="medium",
+                ffmpeg_params=["-crf", "18", "-pix_fmt", "yuv420p"],
+                logger=None,
+            )
 
+            for i, (scale, fps, colors, min_edge_px, lossy) in enumerate(strategies):
+                target_w = compute_target_width(original_w, min_edge, scale, min_edge_px)
+                progress_bar.progress(0.05 + (i + 1) / len(strategies) * 0.95)
+
+                try:
+                    write_palette_gif(ffmpeg, source_path, output_path, target_w, fps, colors)
+                    optimize_gif_with_gifsicle(output_path, colors, lossy)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        size_mb = get_file_size_mb(output_path)
+                        best_size_mb = size_mb if best_size_mb is None else min(best_size_mb, size_mb)
+                        if size_mb <= max_mb:
+                            target_h = max(2, int(original_h * target_w / original_w))
+                            progress_bar.empty()
+                            msg.empty()
+                            st.success(t["success"].format(size=f"{size_mb:.2f}", w=target_w, h=target_h))
+                            return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        finally:
+            remove_file_if_exists(source_path)
+
+    for i, (scale, fps, colors, min_edge_px, lossy) in enumerate(strategies):
+        target_w = compute_target_width(original_w, min_edge, scale, min_edge_px)
+        progress_bar.progress((i + 1) / len(strategies))
         current_clip = clip.resize(width=target_w) if target_w != original_w else clip
         try:
             current_clip.write_gif(output_path, fps=fps, colors=colors, verbose=False, logger=None)
