@@ -1,6 +1,8 @@
 import streamlit as st
 import tempfile
 import os
+import shutil
+import subprocess
 import warnings
 import cv2
 import numpy as np
@@ -17,8 +19,9 @@ if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
 # --- 配置项 ---
-MAX_FILE_SIZE_MB = 1.02
+MAX_FILE_SIZE_MB = 0.95
 MIN_DIMENSION_PX = 320
+MIN_EXPORT_DIMENSION_PX = 220
 MAX_DIMENSION_PX = 1080
 DEFAULT_BTN1_NAME = "btn_appstore.png"
 DEFAULT_BTN2_NAME = "btn_googleplay.png"
@@ -54,7 +57,7 @@ TRANSLATIONS = {
         "btn_generate": "**开始生成 GIF**",
         "balancing": "正在平衡画质与体积...",
         "success": "生成完成 | 体积: {size}MB | 尺寸: {w}x{h}",
-        "warning_best": "已生成最佳结果，体积略大于预期。",
+        "warning_best": "压缩后仍超过限制（当前 {size}MB）。请缩短时长或选择画面更简单的片段。",
         "download": "下载 GIF",
         # [修改] 去除 Emoji，使用 Markdown 加粗
         "btn_restart": "**重新开始 (保留视频)**",
@@ -89,7 +92,7 @@ TRANSLATIONS = {
         "btn_generate": "**Generate GIF**",
         "balancing": "Balancing quality and size...",
         "success": "Done | Size: {size}MB | Dim: {w}x{h}",
-        "warning_best": "Generated best result (slightly over target size).",
+        "warning_best": "Still over the limit after compression ({size}MB). Shorten duration or choose a simpler clip.",
         "download": "Download GIF",
         "btn_restart": "**Restart (Keep Video)**",
         "btn_clear_reset": "**Full Reset (Clear Video)**",
@@ -193,45 +196,91 @@ def create_adaptive_placeholder(text, target_height):
     return path
 
 
+def get_file_size_mb(file_path):
+    return os.path.getsize(file_path) / (1024 * 1024)
+
+
+def remove_file_if_exists(file_path):
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except OSError:
+        pass
+
+
+def optimize_gif_with_gifsicle(file_path, colors, lossy):
+    gifsicle = shutil.which("gifsicle")
+    if not gifsicle or not os.path.exists(file_path):
+        return
+
+    optimized_path = f"{file_path}.optimized.gif"
+    cmd = [gifsicle, "-O3", f"--colors={colors}"]
+    if lossy > 0:
+        cmd.append(f"--lossy={lossy}")
+    cmd.extend([file_path, "-o", optimized_path])
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(optimized_path) and os.path.getsize(optimized_path) < os.path.getsize(file_path):
+            os.replace(optimized_path, file_path)
+        else:
+            remove_file_if_exists(optimized_path)
+    except Exception:
+        remove_file_if_exists(optimized_path)
+
+
 def smart_export_gif(clip, output_path, max_mb=1.0):
     strategies = [
-        (1.0, 20, 256), (1.0, 15, 192), (1.0, 15, 128),
-        (0.95, 15, 128), (0.9, 12, 128), (0.85, 12, 96),
-        (0.8, 10, 64), (0.7, 8, 32)
+        (1.0, 18, 192, MIN_DIMENSION_PX, 0),
+        (0.9, 15, 128, MIN_DIMENSION_PX, 10),
+        (0.8, 12, 96, MIN_DIMENSION_PX, 20),
+        (0.7, 10, 64, MIN_DIMENSION_PX, 30),
+        (0.6, 8, 48, MIN_DIMENSION_PX, 40),
+        (0.65, 8, 48, 280, 45),
+        (0.55, 7, 32, 260, 55),
+        (0.48, 6, 24, 240, 65),
+        (0.4, 5, 16, MIN_EXPORT_DIMENSION_PX, 80),
     ]
     original_w = clip.w
     original_h = clip.h
     min_edge = min(original_w, original_h)
-    absolute_min_scale = MIN_DIMENSION_PX / min_edge if min_edge > 0 else 1.0
+    best_size_mb = None
 
     msg = st.empty()
     progress_bar = st.progress(0)
     st.caption(t["balancing"])
 
-    for i, (scale, fps, colors) in enumerate(strategies):
-        effective_scale = max(scale, absolute_min_scale)
+    for i, (scale, fps, colors, min_edge_px, lossy) in enumerate(strategies):
+        min_scale = min_edge_px / min_edge if min_edge > 0 else 1.0
+        effective_scale = max(scale, min_scale)
         effective_scale = min(effective_scale, 1.0)
-        target_w = int(original_w * effective_scale)
-        target_h = int(original_h * effective_scale)
+        target_w = max(2, int(original_w * effective_scale))
         progress = (i + 1) / len(strategies)
         progress_bar.progress(progress)
 
-        current_clip = clip.resize(width=target_w) if effective_scale != 1.0 else clip
+        current_clip = clip.resize(width=target_w) if target_w != original_w else clip
         try:
             current_clip.write_gif(output_path, fps=fps, colors=colors, verbose=False, logger=None)
+            optimize_gif_with_gifsicle(output_path, colors, lossy)
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                size_mb = get_file_size_mb(output_path)
+                best_size_mb = size_mb if best_size_mb is None else min(best_size_mb, size_mb)
                 if size_mb <= max_mb:
                     progress_bar.empty()
                     msg.empty()
-                    st.success(t["success"].format(size=f"{size_mb:.2f}", w=target_w, h=target_h))
+                    st.success(t["success"].format(size=f"{size_mb:.2f}", w=int(current_clip.w), h=int(current_clip.h)))
                     return True
-        except:
+        except Exception:
             continue
+        finally:
+            if current_clip is not clip:
+                current_clip.close()
 
     progress_bar.empty()
-    msg.warning(t["warning_best"])
-    return True
+    size_label = f"{best_size_mb:.2f}" if best_size_mb is not None else "n/a"
+    msg.warning(t["warning_best"].format(size=size_label))
+    remove_file_if_exists(output_path)
+    return False
 
 
 # --- 核心修改：支持排除片段的搜索算法 ---
@@ -375,7 +424,7 @@ if st.session_state.step == 1:
     st.markdown(f"#### {t['step2_title']}")
     col1, col2 = st.columns(2)
     with col1:
-        gif_duration = st.number_input(t["duration"], value=2.5, step=0.5, max_value=5.0)
+        gif_duration = st.number_input(t["duration"], value=2.0, step=0.5, min_value=1.0, max_value=5.0)
     with col2:
         scale_factor = st.slider(t["scale"], 0.6, 1.0, 0.9)
 
@@ -552,7 +601,7 @@ elif st.session_state.step == 2:
 
                 success = smart_export_gif(final_comp, out_path, max_mb=MAX_FILE_SIZE_MB)
 
-                if success or os.path.exists(out_path):
+                if success:
                     show_gif_robust(out_path)
                     with open(out_path, "rb") as f:
                         col_dl1, col_dl2, col_dl3 = st.columns([1, 2, 1])
