@@ -1,12 +1,15 @@
 import streamlit as st
 import tempfile
 import os
+import warnings
 import cv2
 import numpy as np
 import time
 import math
 import base64
 from PIL import Image, ImageFilter, ImageDraw, ImageFont, ImageChops
+
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"moviepy(\.|$)")
 from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip
 
 # --- 兼容性修复 ---

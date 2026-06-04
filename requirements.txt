@@ -1,5 +1,7 @@
-streamlit
+streamlit==1.58.0
 opencv-python-headless
 moviepy==1.0.3
 pillow
 numpy
+imageio-ffmpeg
+rich
